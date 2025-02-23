@@ -26,8 +26,3 @@ function luv3d2d:Create3D2DCanvas(origin, ang, w, h, scale, useFocus)
     table.insert(self.canvases, canvas)
     return canvas
 end
-
-for k, v in ipairs(ents.FindByClass("item_suitcharger")) do
-    print("Creating canvas for", v)
-    luv3d2d:Create3D2DCanvas(v:GetPos(), v:GetAngles(), 512, 256, 0.1, true)
-end
