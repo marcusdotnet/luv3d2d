@@ -8,6 +8,8 @@ AddCSLuaFile()
 ---@field public SetInputDistance fun(self: luv3d2d.CanvasEntity, dist: number)
 ---@field public GetSize fun():number, number
 ---@field public GetPanel fun(): Panel
+---@field public GetFocusZoom fun():number Get the focus zoom
+---@field public SetFocusZoom fun(self: luv3d2d.CanvasEntity, zoom: number) Override the default focus zoom
 ---@field private _panel Panel
 ---@field private _scale number The scale of the canvas
 ---@field private _renderDistance number The distance at which the canvas will render
@@ -23,6 +25,7 @@ AddCSLuaFile()
 ---@field private _hoveredPanel? Panel The panel that the player is hovering over
 ---@field private _lastHoveredPanel? Panel The last panel that the player hovered over
 ---@field private _isFocused boolean Whether the player is focused on the canvas
+---@field private _shouldRender boolean Whether the panel should be rendered
 
 ---@class luv3d2d.CanvasEntity
 local ENT = ENT --[[@as luv3d2d.CanvasEntity]]
@@ -253,7 +256,7 @@ function ENT:Initialize()
             -- Calculate optimal focus distance
             local panelHeight = h * scale
             self._focusDistance = panelHeight / (2 * tan(rad(FOCUS_FOV / 2)))
-            self._focusDistance = max(self._focusDistance, FOCUS_DISTANCE_OFFSET)
+            self._focusDistance = max(self._focusDistance, self._focusZoom)
         end
 
         local progress = clamp((curTime - self._focusStartTime) / LERP_DURATION, 0, 1)
@@ -305,7 +308,47 @@ function ENT:Initialize()
     -- Initial values...
     self:SetInputDistance(100)
     self:SetRenderDistance(200)
+    self:SetFocusZoom(1)
     self:SetupPanel(150, 150, 0.1, false)
+end
+
+--- Attach the canvas to an entity
+---@param ent Entity The entity to attach to
+---@param offset? Vector The local position offset from the entity
+---@param angOffset? Angle The local angle offset relative to the entity
+function ENT:AttachToEntity(ent, offset, angOffset)
+    self:SetParent(ent)
+
+    if offset then
+        self:SetLocalPos(offset)
+    else
+        self:SetLocalPos(vector_origin)
+    end
+
+    if angOffset then
+        self:SetLocalAngles(angOffset) -- Local angle offset
+    else
+        self:SetLocalAngles(angle_zero)
+    end
+
+    -- Cleanup when parent entity is removed
+    ent:CallOnRemove("luv3d2d_canvas_remove_" .. tostring(ent), function()
+        if IsValid(self) then
+            self:Remove()
+        end
+    end)
+end
+
+---Get the focus zoom
+---@return number The focus zoom
+function ENT:GetFocusZoom()
+    return self._focusZoom
+end
+
+---Override the default focus zoom
+---@param zoom number The zoom to use
+function ENT:SetFocusZoom(zoom)
+    self._focusZoom = FOCUS_DISTANCE_OFFSET / zoom
 end
 
 ---Check if the canvas is focused
@@ -450,8 +493,8 @@ end
 function ENT:Draw()
     local panel = self._panel
     if not IsValid(panel) or not self._topLeftCorner then return end
-    if not panel:IsVisible() then
-        panel:Show()
+    if self._shouldRender and not self._panel:IsVisible() then
+        self._panel:Show()
     end
 
     local panelPos = self._panelVector
@@ -492,16 +535,12 @@ function ENT:Think()
     -- Update input state
     self._isDistant = calcIsFarFromCanvas(self)
     local cursorX, cursorY
-    if self._isDistant then
-        -- Don't render if too far
-        if IsValid(self._panel) then
-            self._panel:Hide()
-        end
-    else
-        if IsValid(self._panel) and not self._panel:IsVisible() then
-            self._panel:Show() -- Show if not too far
-        end
+    self._shouldRender = false -- Default to false because Draw isn't called when you look away from the canvas
 
+    if self._isDistant then
+        self._shouldRender = false
+    else
+        self._shouldRender = true
         cursorX, cursorY = calcCursorPosition(self)
     end
     self._cursorX = cursorX
@@ -552,5 +591,9 @@ function ENT:Think()
 
         gui.MouseX = gui_MouseX
         gui.MouseY = gui_MouseY
+    end
+
+    if not self._shouldRender and IsValid(self._panel) and self._panel:IsVisible() then
+        self._panel:Hide()
     end
 end
