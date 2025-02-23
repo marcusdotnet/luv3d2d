@@ -1,7 +1,7 @@
 <h1 align="center">luv3d2d 🎨</h1>
 
 <p align="center">
-  A Garry's Mod addon for creating 3D2D canvases with ease.
+  A Garry's Mod library for creating 3D2D canvases with ease.
 </p>
 
 ## Table of Contents
