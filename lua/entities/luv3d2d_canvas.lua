@@ -35,16 +35,17 @@ ENT.Category = ""
 ENT.Purpose = "Make it easy to create 3D2D panels."
 ENT.Spawnable = false
 if SERVER then return end
-local abs, min, max, clamp = math.abs, math.min, math.max, math.Clamp
+local abs, min, max, clamp, tan, rad = math.abs, math.min, math.max, math.Clamp, math.tan, math.rad
 local vgui_GetHoveredPanel = vgui.GetHoveredPanel
 local gui_MouseX, gui_MouseY = gui.MouseX, gui.MouseY
 
--- Globals
-local PANEL_ANG_OFFSET = Angle(0, 90, 90)
-local FOCUS_FOV = 30              -- The FOV to use when focusing on the canvas
-local FOCUS_DISTANCE_OFFSET = 60  -- How far away from the canvas to focus
-local LERP_DURATION = 0.5         -- How long it takes to focus on the canvas
-local KEYPRESS_HOOK_DELAY_S = 0.1 -- How long to wait before allowing another key press
+---Globals
+local PANEL_ANG_OFFSET = Angle(0, 90, 90)       -- The angle offset for the panel (panel rendering works weirdly so we have to do this)
+local FOCUS_PANEL_ANG_OFFSET = Angle(0, 180, 0) -- The angle offset to use when focusing on the panel
+local FOCUS_FOV = 30                            -- The FOV to use when focusing on the canvas
+local FOCUS_DISTANCE_OFFSET = 160               -- How far away from the canvas to focus
+local LERP_DURATION = 0.5                       -- How long it takes to focus on the canvas
+local KEYPRESS_HOOK_DELAY_S = 0.1               -- How long to wait before allowing another key press
 
 ---Add a hook to the canvas that is removed when the canvas is removed
 ---@param canvas luv3d2d.CanvasEntity
@@ -149,6 +150,24 @@ local function calcCursorPosition(canvas)
     end
 end
 
+--- Get the absolute position of a panel
+---@param panel Panel
+---@return number x
+---@return number y
+---@nodiscard
+local function calcAbsolutePanelPos(panel)
+    local x, y = panel:GetPos()
+    local parents = findAllParents(panel)
+
+    for _, parent in ipairs(parents) do
+        local px, py = parent:GetPos()
+        x = x + px
+        y = y + py
+    end
+
+    return x, y
+end
+
 ---Initialize
 function ENT:Initialize()
     -- Set up physics, rendering
@@ -171,6 +190,7 @@ function ENT:Initialize()
 
             if not self._hoveredPanel or not self._hoveredPanel:IsHovered() then return end
             self:EmitPanelEvent(self._hoveredPanel, "OnMousePressed", key)
+            self:EmitPanelEvent(self._hoveredPanel, "DoClick")
         elseif self.UseFocus and key == IN_USE and self._isInputAllowed then
             self:SetFocused(not self._isFocused)
         end
@@ -189,6 +209,7 @@ function ENT:Initialize()
     addCanvasHook(self, "GUIMousePressed", function(key)
         if not self._hoveredPanel or not self._hoveredPanel:IsHovered() then return end
         self:EmitPanelEvent(self._hoveredPanel, "OnMousePressed", key)
+        self:EmitPanelEvent(self._hoveredPanel, "DoClick")
     end)
 
     -- Mouse release (while focused)
@@ -203,42 +224,48 @@ function ENT:Initialize()
     ---@param fov number
     addCanvasHook(self, "CalcView", function(ply, viewOrigin, viewAng, fov)
         if not self._isFocused then
-            if vgui.CursorVisible() then -- Hide cursor when not focused
+            if vgui.CursorVisible() then
                 gui.EnableScreenClicker(false)
             end
-            -- Reset lerp progress when not focused
             self._focusStartTime = nil
             self._originalFov = nil
             return
         end
 
-        -- Enable cursor when focused
         gui.EnableScreenClicker(true)
-        local canvasCenter = self._center
         local curTime = CurTime()
 
+        -- First-time setup
         if not self._focusStartTime then
             self._focusStartTime = curTime
             self._originalFov = fov
+            self._originalViewAng = viewAng
+
+            -- Get true panel parameters
+            local w, h = self:GetSize()
+            local scale = self._scale
+            self._truePanelAng = self:LocalToWorldAngles(FOCUS_PANEL_ANG_OFFSET)
+
+            -- Calculate true center point accounting for panel rotation
+            local panelCenterOffset = Vector(0, (w / 2) * scale, (h / 2) * scale)
+            self._truePanelCenter = self:LocalToWorld(panelCenterOffset)
+
+            -- Calculate optimal focus distance
+            local panelHeight = h * scale
+            self._focusDistance = panelHeight / (2 * tan(rad(FOCUS_FOV / 2)))
+            self._focusDistance = max(self._focusDistance, FOCUS_DISTANCE_OFFSET)
         end
 
         local progress = clamp((curTime - self._focusStartTime) / LERP_DURATION, 0, 1)
-        local currentFov = Lerp(progress, self._originalFov, FOCUS_FOV)
 
-        local w, h = self:GetSize()
-        local halfFov = math.rad(FOCUS_FOV / 2)
-        local distX = (w * self._scale) / 2 / math.tan(halfFov)
-        local distY = (h * self._scale) / 2 / math.tan(halfFov)
-        local computedDistance = math.max(distX, distY)
-        local focusDistance = math.max(computedDistance, FOCUS_DISTANCE_OFFSET)
-
-        local targetPos = canvasCenter - viewAng:Forward() * focusDistance
-        local currentPos = LerpVector(progress, viewOrigin, targetPos)
+        -- Calculate target view parameters
+        local targetAng = Angle(self._truePanelAng.p, self._truePanelAng.y, 0) -- Lock roll to 0
+        local targetPos = self._truePanelCenter - targetAng:Forward() * self._focusDistance
 
         return {
-            fov = currentFov,
-            origin = currentPos,
-            angles = viewAng
+            fov = Lerp(progress, self._originalFov, FOCUS_FOV),
+            origin = LerpVector(progress, viewOrigin, targetPos),
+            angles = LerpAngle(progress, self._originalViewAng, targetAng)
         }
     end)
 
@@ -261,6 +288,18 @@ function ENT:Initialize()
                 end
             end
         end
+    end)
+
+    -- Hiding players when focused
+    addCanvasHook(self, "PrePlayerDraw", function(_, __)
+        if not self._isFocused then return end
+        return true
+    end)
+
+    -- Hiding viewmodels when focused
+    addCanvasHook(self, "PreDrawViewModel", function(_, __, ___, ____)
+        if not self._isFocused then return end
+        return true
     end)
 
     -- Initial values...
@@ -338,10 +377,6 @@ function ENT:SetupPanel(w, h, scale, useFocus)
             self:SetFocused(false)
         end
     end
-    self._panel.OnMouseWheeled = function(_, scrollDelta)
-        print("scrolldelta", scrollDelta)
-    end
-
 
     self.UseFocus = useFocus or false
     self._scale = (scale or 10) / 10
@@ -365,7 +400,7 @@ local function getHoveredPanel(canvas)
         if not pnl:IsVisible() or not pnl:IsMouseInputEnabled() then return nil end
 
         -- Get panel's absolute position and size
-        local x, y = canvas:GetAbsolutePanelPos(pnl)
+        local x, y = calcAbsolutePanelPos(pnl)
         local w, h = pnl:GetSize()
 
         -- Check if cursor is within panel bounds
@@ -394,24 +429,6 @@ function ENT:GetHoveredPanel()
     return self._hoveredPanel
 end
 
---- Get the absolute position of a panel
----@param panel Panel
----@return number x
----@return number y
----@nodiscard
-function ENT:GetAbsolutePanelPos(panel)
-    local x, y = panel:GetPos()
-    local parents = findAllParents(panel)
-
-    for _, parent in ipairs(parents) do
-        local px, py = parent:GetPos()
-        x = x + px
-        y = y + py
-    end
-
-    return x, y
-end
-
 ---Send a panel event to the canvas
 ---@param panel Panel
 ---@param event string
@@ -433,12 +450,6 @@ end
 function ENT:Draw()
     local panel = self._panel
     if not IsValid(panel) or not self._topLeftCorner then return end
-    if self._isDistant then
-        panel:Hide()
-        return
-    end -- Don't render if too far
-
-    -- Show the panel if it's not visible (usually when we're too far)
     if not panel:IsVisible() then
         panel:Show()
     end
@@ -451,21 +462,6 @@ function ENT:Draw()
     panel:SetPaintedManually(true)
     panel:PaintManual(true)
     cam.End3D2D()
-
-    -- Override mouse position getters
-    if self._isLookedAt then
-        local cursorX, cursorY = self._cursorX, self._cursorY
-        function gui.MouseX()
-            return (cursorX or 0) / scale
-        end
-
-        function gui.MouseY()
-            return (cursorY or 0) / scale
-        end
-    else
-        gui.MouseX = gui_MouseX
-        gui.MouseY = gui_MouseY
-    end
 end
 
 ---Cleanup
@@ -496,7 +492,16 @@ function ENT:Think()
     -- Update input state
     self._isDistant = calcIsFarFromCanvas(self)
     local cursorX, cursorY
-    if not self._isDistant then
+    if self._isDistant then
+        -- Don't render if too far
+        if IsValid(self._panel) then
+            self._panel:Hide()
+        end
+    else
+        if IsValid(self._panel) and not self._panel:IsVisible() then
+            self._panel:Show() -- Show if not too far
+        end
+
         cursorX, cursorY = calcCursorPosition(self)
     end
     self._cursorX = cursorX
@@ -511,6 +516,7 @@ function ENT:Think()
     self._hoveredPanel = self._isInputAllowed and getHoveredPanel(self) or nil
 
     if self._isLookedAt then
+        -- Hover over a new panel
         if self._hoveredPanel != self._lastHoveredPanel then
             -- Exit old panel
             if IsValid(self._lastHoveredPanel) then
@@ -523,9 +529,18 @@ function ENT:Think()
                 vgui.GetHoveredPanel = function() return self._hoveredPanel end
             end
 
+            -- Update last hovered panel
             self._lastHoveredPanel = self._hoveredPanel
         end
-    elseif wasLookedAt then
+
+        function gui.MouseX()
+            return (cursorX or 0) / scale
+        end
+
+        function gui.MouseY()
+            return (cursorY or 0) / scale
+        end
+    elseif wasLookedAt then -- Was looked at but no longer
         -- Force clear all states when losing focus
         if IsValid(self._lastHoveredPanel) then
             self:EmitPanelEvent(self._lastHoveredPanel, "OnCursorExited")
@@ -534,5 +549,8 @@ function ENT:Think()
         end
         self._lastHoveredPanel = nil
         vgui.GetHoveredPanel = vgui_GetHoveredPanel
+
+        gui.MouseX = gui_MouseX
+        gui.MouseY = gui_MouseY
     end
 end
