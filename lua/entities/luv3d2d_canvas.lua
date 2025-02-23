@@ -1,13 +1,14 @@
 AddCSLuaFile()
 
 ---@class luv3d2d.CanvasEntity : ENTITY
----@field public Panel Panel
 ---@field public UseFocus boolean Whether to use the focus system for this canvas
 ---@field public GetRenderDistance fun():number
 ---@field public SetRenderDistance fun(self: luv3d2d.CanvasEntity, dist: number)
 ---@field public GetInputDistance fun():number
 ---@field public SetInputDistance fun(self: luv3d2d.CanvasEntity, dist: number)
 ---@field public GetSize fun():number, number
+---@field public GetPanel fun(): Panel
+---@field private _panel Panel
 ---@field private _scale number The scale of the canvas
 ---@field private _renderDistance number The distance at which the canvas will render
 ---@field private _inputDistance number The distance at which the canvas will accept input
@@ -41,6 +42,7 @@ local gui_MouseX, gui_MouseY = gui.MouseX, gui.MouseY
 -- Globals
 local PANEL_ANG_OFFSET = Angle(0, 90, 90)
 local FOCUS_FOV = 30              -- The FOV to use when focusing on the canvas
+local FOCUS_DISTANCE_OFFSET = 60  -- How far away from the canvas to focus
 local LERP_DURATION = 0.5         -- How long it takes to focus on the canvas
 local KEYPRESS_HOOK_DELAY_S = 0.1 -- How long to wait before allowing another key press
 
@@ -222,7 +224,15 @@ function ENT:Initialize()
 
         local progress = clamp((curTime - self._focusStartTime) / LERP_DURATION, 0, 1)
         local currentFov = Lerp(progress, self._originalFov, FOCUS_FOV)
-        local targetPos = canvasCenter - viewAng:Forward() * 60
+
+        local w, h = self:GetSize()
+        local halfFov = math.rad(FOCUS_FOV / 2)
+        local distX = (w * self._scale) / 2 / math.tan(halfFov)
+        local distY = (h * self._scale) / 2 / math.tan(halfFov)
+        local computedDistance = math.max(distX, distY)
+        local focusDistance = math.max(computedDistance, FOCUS_DISTANCE_OFFSET)
+
+        local targetPos = canvasCenter - viewAng:Forward() * focusDistance
         local currentPos = LerpVector(progress, viewOrigin, targetPos)
 
         return {
@@ -245,7 +255,7 @@ function ENT:Initialize()
         local mouseScrollOffset = ((input.WasMousePressed(MOUSE_WHEEL_UP) and 1) or
             (input.WasMousePressed(MOUSE_WHEEL_DOWN) and -1)) or nil
         if isnumber(mouseScrollOffset) then
-            for _, pnl in pairs(self.Panel:GetChildren()) do
+            for _, pnl in pairs(self._panel:GetChildren()) do
                 if pnl:IsVisible() then
                     self:EmitPanelEvent(pnl, "OnMouseWheeled", mouseScrollOffset)
                 end
@@ -269,7 +279,7 @@ end
 ---@param focused boolean Whether the canvas is focused
 function ENT:SetFocused(focused)
     self._isFocused = focused
-    self.Panel:SetKeyboardInputEnabled(focused)
+    self._panel:SetKeyboardInputEnabled(focused)
 end
 
 ---Get the render distance of the canvas
@@ -301,8 +311,14 @@ end
 ---@return number|nil y
 ---@nodiscard
 function ENT:GetSize()
-    if not self.Panel then return nil, nil end
-    return self.Panel:GetSize()
+    if not self._panel then return nil, nil end
+    return self._panel:GetSize()
+end
+
+---Get the panel of the canvas
+---@return Panel panel The panel of the canvas
+function ENT:GetPanel()
+    return self._panel
 end
 
 ---Create(or re-create) the panel for the canvas
@@ -311,18 +327,18 @@ end
 ---@param scale? number = 10 How much to scale the canvas by
 ---@param useFocus? boolean = false Whether to use the focus system
 function ENT:SetupPanel(w, h, scale, useFocus)
-    if IsValid(self.Panel) then
-        self.Panel:Remove()
+    if IsValid(self._panel) then
+        self._panel:Remove()
     end
 
-    self.Panel = vgui.Create("DPanel")
-    self.Panel:SetSize(w, h)
-    self.Panel.OnKeyCodePressed = function(_, keyCode)
+    self._panel = vgui.Create("DPanel")
+    self._panel:SetSize(w, h)
+    self._panel.OnKeyCodePressed = function(_, keyCode)
         if keyCode == KEY_E or keyCode == KEY_ESCAPE then
             self:SetFocused(false)
         end
     end
-    self.Panel.OnMouseWheeled = function(_, scrollDelta)
+    self._panel.OnMouseWheeled = function(_, scrollDelta)
         print("scrolldelta", scrollDelta)
     end
 
@@ -369,7 +385,7 @@ local function getHoveredPanel(canvas)
         return pnl
     end
 
-    return findHovered(canvas.Panel)
+    return findHovered(canvas._panel)
 end
 
 ---Get the hovered panel under the cursor
@@ -415,7 +431,7 @@ end
 
 ---Draw
 function ENT:Draw()
-    local panel = self.Panel
+    local panel = self._panel
     if not IsValid(panel) or not self._topLeftCorner then return end
     if self._isDistant then
         panel:Hide()
@@ -454,8 +470,8 @@ end
 
 ---Cleanup
 function ENT:OnRemove()
-    if IsValid(self.Panel) then
-        self.Panel:Remove()
+    if IsValid(self._panel) then
+        self._panel:Remove()
     end
 
     vgui.GetHoveredPanel = vgui_GetHoveredPanel -- Reset the hovered panel getter
